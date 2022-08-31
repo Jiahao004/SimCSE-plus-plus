@@ -1,4 +1,6 @@
 # decoupled_simcse
+![Fig1. Decoupled simcse balance the loss for both subnetworks during contrastive learning](https://github.com/Jiahao004/decoupled_simcse/blob/main/1.png)
+
 decoupled_simcse
 ## environment
 cuda10.2
