@@ -13,7 +13,7 @@ export no_proxy="byted.org,bytedance.net,.byted.org,.bytedance.net,localhost,127
 
 nvidia-smi
 
-NUM_GPU=2
+NUM_GPU=4
 
 ## Randomly set a port number
 ## If you encounter "address already used" error, just run again or manually set an available port id.
@@ -24,15 +24,14 @@ export OMP_NUM_THREADS=8
 
 
 lr=3e-5
-eval_steps=125
 model=bert-base-uncased
-env=torch1.12.1_datasets1.18.3_cuda10.2
-pos_ratio=0.9
-#python3 -m torch.distributed.launch --nproc_per_node $NUM_GPU --master_port $PORT_ID train_re.py --fp16 \
-python3 train_re.py --fp16 \
-    --model_name_or_path  $model --pos_ratio $pos_ratio \
+env=torch1.10.2_datasets1.18.3_cuda10.2
+
+#python3 -m torch.distributed.launch --nproc_per_node $NUM_GPU --master_port $PORT_ID train_vicreg.py \
+python3 train_vicreg.py --fp16 \
+    --model_name_or_path $model --fp16 \
     --train_file data/wiki1m_for_simcse.txt \
-    --output_dir result/re-unsup-simcse-$model-pos_ratio_$pos_ratio-$env-fp16 \
+    --output_dir result/sw-only-$model-t5-w0.1 \
     --num_train_epochs 1 \
     --per_device_train_batch_size 64 \
     --learning_rate $lr \

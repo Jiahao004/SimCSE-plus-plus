@@ -8,10 +8,10 @@ export https_proxy="http://sys-proxy-rd-relay.byted.org:8118"
 export no_proxy="byted.org,bytedance.net,.byted.org,.bytedance.net,localhost,127.0.0.1,::1,10.0.0.0/8,127.0.0.0/8,fd00::/8,100.64.0.0/10,fe80::/10,172.16.0.0/12,169.254.0.0/16,192.168.0.0/16"
 
 
-env=torch1.12.1_datasets1.18.3_cuda11
+
 
 nvidia-smi
-NUM_GPU=2
+NUM_GPU=4
 
 # Randomly set a port number
 # If you encounter "address already used" error, just run again or manually set an available port id.
@@ -20,18 +20,22 @@ PORT_ID=$(expr $RANDOM + 1000)
 # Allow multiple threads
 export OMP_NUM_THREADS=8
 
-model=sentence-transformers/bert-base-nli-cls-token
+#model=sentence-transformers/bert-base-nli-cls-token
+model=roberta-base
+
+env=torch1.12.1-cuda10.2
+lr=1e-5
+bs=64
 # Use distributed data parallel
 # If you only want to use one card, uncomment the following line and comment the line with "torch.distributed.launch"
-# python train.py \
 # python3 -m torch.distributed.launch --nproc_per_node $NUM_GPU --master_port $PORT_ID train.py \
-python3 train.py --fp16 \
-    --model_name_or_path $model --fp16 \
+python train.py \
+    --model_name_or_path $model --fp16 --overwrite_cache \
     --train_file data/wiki1m_for_simcse.txt \
-    --output_dir result/unsup-simcse-$model-lr_3e-5-cuda11-fp16 \
+    --output_dir result/unsup-simcse-$model-lr_$lr-bs_$bs-$env-fp16 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 64 \
-    --learning_rate 3e-5 \
+    --per_device_train_batch_size $bs \
+    --learning_rate $lr \
     --max_seq_length 32 \
     --evaluation_strategy steps \
     --metric_for_best_model stsb_spearman \

@@ -15,26 +15,27 @@ nvidia-smi
 
 NUM_GPU=2
 
-## Randomly set a port number
-## If you encounter "address already used" error, just run again or manually set an available port id.
+# Randomly set a port number
+# If you encounter "address already used" error, just run again or manually set an available port id.
 PORT_ID=$(expr $RANDOM + 1000)
 
-## Allow multiple threads
+# Allow multiple threads
 export OMP_NUM_THREADS=8
 
 
 lr=3e-5
-eval_steps=125
+bs=64
 model=bert-base-uncased
-env=torch1.12.1_datasets1.18.3_cuda10.2
-pos_ratio=0.9
-#python3 -m torch.distributed.launch --nproc_per_node $NUM_GPU --master_port $PORT_ID train_re.py --fp16 \
-python3 train_re.py --fp16 \
-    --model_name_or_path  $model --pos_ratio $pos_ratio \
+env=torch1.10.2_datasets1.18.3_cuda10.2
+pos=1
+
+#python3 -m torch.distributed.launch --nproc_per_node $NUM_GPU --master_port $PORT_ID train_re_vicreg.py \
+python3 train_re_vicreg.py --fp16  \
+    --model_name_or_path $model --pos_ratio $pos \
     --train_file data/wiki1m_for_simcse.txt \
-    --output_dir result/re-unsup-simcse-$model-pos_ratio_$pos_ratio-$env-fp16 \
+    --output_dir result/re-unsup-simcse-$model-$env-lr_$lr-bs_$bs-vicreg_t5_w0.1_pos$pos \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 64 \
+    --per_device_train_batch_size $bs \
     --learning_rate $lr \
     --max_seq_length 32 \
     --evaluation_strategy steps \
