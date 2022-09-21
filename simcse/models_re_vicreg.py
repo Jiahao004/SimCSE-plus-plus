@@ -93,6 +93,7 @@ def cl_init(cls, config):
         cls.mlp = MLPLayer(config)
     cls.sim = Similarity(temp=cls.model_args.temp)
     cls.init_weights()
+    cls.bn = nn.BatchNorm1d(config.hidden_size, affine=False)
 
 
 def gather_from_dist(z3):
@@ -221,11 +222,11 @@ def cl_forward(cls,
     cos_sim = 0
 
     pos_ratio = cls.model_args.pos_ratio
-    dropout_norm = cls.sim(z1, z2)
+    pos_norm = cls.sim(z1, z2)
     for name, layer in encoder.named_modules():
         if isinstance(layer, nn.Dropout):
             layer.eval()
-    
+
     outputs0 = encoder(
         input_ids0,
         attention_mask=attention_mask0,
@@ -239,21 +240,27 @@ def cl_forward(cls,
     )
 
     z0 = cls.pooler(attention_mask0, outputs0)
-    if cls.pooler_type=="cls":
-        z0=cls.mlp(z0)
-    z0=gather_from_dist(z0)
-    SMALL_NUM=np.log(1e-45)
-    dropout_norm = pos_ratio*dropout_norm
-    pos_loss = -dropout_norm
+    if cls.pooler_type == "cls":
+        z0 = cls.mlp(z0)
+    z0 = gather_from_dist(z0)
+    SMALL_NUM = np.log(1e-45)
+    pos_norm = pos_ratio * pos_norm
+    pos_loss = -pos_norm
 
-    cos_sim = cls.sim(z0.unsqueeze(0),z0.unsqueeze(1))
+    cos_sim = cls.sim(z0.unsqueeze(0), z0.unsqueeze(1))
     neg_mask = torch.eye(z1.size(0), device=z1.device)
-    neg_sim = cos_sim+neg_mask*SMALL_NUM
-    neg_sim = torch.cat([neg_sim, dropout_norm.unsqueeze(-1)], dim=-1)
+    neg_sim = cos_sim + neg_mask * SMALL_NUM
+    neg_sim = torch.cat([neg_sim, pos_norm.unsqueeze(-1)], dim=-1)
     neg_loss = torch.logsumexp(neg_sim, dim=-1, keepdim=False)
-    loss = (pos_loss+neg_loss).mean()
+    loss = (pos_loss + neg_loss).mean()
 
-    loss_fct = nn.CrossEntropyLoss()
+    # covariance
+    temp = cls.model_args.sw_temp
+    weight = cls.model_args.sw_weight
+    z1_normd, z2_normd = cls.bn(z1), cls.bn(z2)
+    cov = (z1_normd.T @ z2_normd)/batch_size/temp
+    cov_loss = (-torch.diagonal(cov)+torch.logsumexp(cov, dim=-1)).mean()
+    loss += weight * cov_loss
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:

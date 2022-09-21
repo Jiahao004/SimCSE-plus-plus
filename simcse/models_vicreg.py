@@ -93,6 +93,7 @@ def cl_init(cls, config):
         cls.mlp = MLPLayer(config)
     cls.sim = Similarity(temp=cls.model_args.temp)
     cls.init_weights()
+    cls.bn = nn.BatchNorm1d(config.hidden_size, affine=False)
 
 
 def gather_from_dist(z3):
@@ -217,43 +218,18 @@ def cl_forward(cls,
         z1 = torch.cat(z1_list, 0)
         z2 = torch.cat(z2_list, 0)
 
-    loss = 0
-    cos_sim = 0
+    cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+    loss = (-torch.diagonal(cos_sim)+torch.logsumexp(cos_sim, dim=-1)).mean()
 
-    pos_ratio = cls.model_args.pos_ratio
-    dropout_norm = cls.sim(z1, z2)
-    for name, layer in encoder.named_modules():
-        if isinstance(layer, nn.Dropout):
-            layer.eval()
-    
-    outputs0 = encoder(
-        input_ids0,
-        attention_mask=attention_mask0,
-        token_type_ids=token_type_ids0,
-        position_ids=position_ids,
-        head_mask=head_mask,
-        inputs_embeds=inputs_embeds,
-        output_attentions=output_attentions,
-        output_hidden_states=True if cls.model_args.pooler_type in ['avg_top2', 'avg_first_last'] else False,
-        return_dict=True,
-    )
+    # covariance
+    temp = 10
+    weight = 0.1
+    z1_normd, z2_normd = cls.bn(z1), cls.bn(z2)
+    cov = (z1_normd.T @ z2_normd) / batch_size / temp
 
-    z0 = cls.pooler(attention_mask0, outputs0)
-    if cls.pooler_type=="cls":
-        z0=cls.mlp(z0)
-    z0=gather_from_dist(z0)
-    SMALL_NUM=np.log(1e-45)
-    dropout_norm = pos_ratio*dropout_norm
-    pos_loss = -dropout_norm
+    cov_loss = (-torch.diagonal(cov) + torch.logsumexp(cov, dim=-1)).mean()
+    loss += weight * cov_loss
 
-    cos_sim = cls.sim(z0.unsqueeze(0),z0.unsqueeze(1))
-    neg_mask = torch.eye(z1.size(0), device=z1.device)
-    neg_sim = cos_sim+neg_mask*SMALL_NUM
-    neg_sim = torch.cat([neg_sim, dropout_norm.unsqueeze(-1)], dim=-1)
-    neg_loss = torch.logsumexp(neg_sim, dim=-1, keepdim=False)
-    loss = (pos_loss+neg_loss).mean()
-
-    loss_fct = nn.CrossEntropyLoss()
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:
