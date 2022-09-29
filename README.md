@@ -13,7 +13,12 @@ bert-base-uncased: torch==1.10.2; bert-large-uncased: torch==1.12.1
 two scripts
 
 original simcse: run_unsup_examples.sh
+
 decoupled simcse (non-dropout version): run_re.sh
+
+soft whitening simcse: run_vicreg.sh
+
+SwDeCSE: run_re_vicreg.sh
 
 ### non-dropout version
 sample one more representation without dropout (full PLM network) for negative contrasting, while using the dropout positives for regulization only
