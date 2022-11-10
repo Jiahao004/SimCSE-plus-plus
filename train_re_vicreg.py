@@ -122,10 +122,29 @@ class ModelArguments:
             "help": "Use MLP only during training"
         }
     )
-    pos_ratio: float=field(
-        default=0.9,
+
+    dropout_rate:float = field(
+        default=-1,
         metadata={
-            "help":"the ratio for dropout norm term, 0.9 by default"
+            "help":"the dropout rate for encoders"
+        }
+    )
+    n_samples: int=field(
+        default=2,
+        metadata={
+            "help":"the number of samples for sammpling"
+        }
+    )
+    sampling_strategy: str=field(
+        default="None",
+        metadata={
+            "help":"the sampling strategy, could be farest, mean, and off_dropout"
+        }
+    )
+    pos_ratio: float=field(
+        default=1,
+        metadata={
+            "help":"the ratio for pos term, 1 by default"
         }
     )
     sw_temp:float=field(
@@ -135,10 +154,25 @@ class ModelArguments:
         }
     )
     sw_weight:float=field(
-        default=0.1,
+        default=-1,
         metadata={
             "help":"soft whitening objective weight, 0.1 by default"
         }
+    )
+    sw_pos_ratio:float=field(
+        default=1,
+        metadata={
+            "help":"the ratio for columnwise term"
+        }
+    )
+    sw_sampling_strategy: str = field(
+        default="None",
+        metadata={
+            "help": "the sampling strategy, could be, mean, and off_dropout or None"
+        }
+    )
+    sw_only: bool = field(
+        default=False, metadata={"help":"if only use orthogonal learning without data instance wise CL"}
     )
 
 
@@ -348,6 +382,14 @@ def main():
         config = CONFIG_MAPPING[model_args.model_type]()
         logger.warning("You are instantiating a new config instance from scratch.")
 
+    if model_args.dropout_rate>0:
+        print(f"**********using customized dropout rate:{model_args.dropout_rate}**********")
+        config.hidden_dropout_prob = model_args.dropout_rate
+        config.attention_probs_dropout_prob = model_args.dropout_rate
+    else:
+        hidden_dropout_prob = config.hidden_dropout_prob
+        attention_probs_dropout_prob = config.attention_probs_dropout_prob
+
     tokenizer_kwargs = {
         "cache_dir": model_args.cache_dir,
         "use_fast": model_args.use_fast_tokenizer,
@@ -373,7 +415,9 @@ def main():
                 cache_dir=model_args.cache_dir,
                 revision=model_args.model_revision,
                 use_auth_token=True if model_args.use_auth_token else None,
-                model_args=model_args                  
+                model_args=model_args,
+                # hidden_dropout_prob=hidden_dropout_prob,
+                # attention_probs_dropout_prob=attention_probs_dropout_prob,
             )
         elif 'bert' in model_args.model_name_or_path:
             model = BertForCL.from_pretrained(
@@ -383,7 +427,9 @@ def main():
                 cache_dir=model_args.cache_dir,
                 revision=model_args.model_revision,
                 use_auth_token=True if model_args.use_auth_token else None,
-                model_args=model_args
+                model_args=model_args,
+                # hidden_dropout_prob=hidden_dropout_prob,
+                # attention_probs_dropout_prob=attention_probs_dropout_prob,
             )
             if model_args.do_mlm:
                 pretrained_model = BertForPreTraining.from_pretrained(model_args.model_name_or_path)
@@ -566,6 +612,7 @@ def main():
         )
         train_result = trainer.train(model_path=model_path)
         trainer.save_model()  # Saves the tokenizer too for easy upload
+        torch.save(trainer.obs, os.path.join(training_args.output_dir, "obs.pt"))
 
         output_train_file = os.path.join(training_args.output_dir, "train_results.txt")
         if trainer.is_world_process_zero():
