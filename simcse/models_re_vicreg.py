@@ -82,6 +82,14 @@ class Pooler(nn.Module):
         else:
             raise NotImplementedError
 
+def align_loss(x, y, alpha=2):
+    return (x - y).norm(p=2, dim=1).pow(alpha).mean()
+
+def uniform_loss(x, t=2):
+    return torch.pdist(x, p=2).pow(2).mul(-t).exp().mean().log()
+
+import torch.nn.functional as F
+
 
 def cl_init(cls, config):
     """
@@ -141,14 +149,20 @@ def cl_forward(cls,
     batch_size = input_ids.size(0)
     # Number of sentences in one instance
     # 2: pair instance; 3: pair instance with a hard negative
-    num_sent = input_ids.size(1)
+    num_sent = cls.model_args.n_samples
 
     mlm_outputs = None
     # Flatten input for encoding
-    input_ids = input_ids.view((-1, input_ids.size(-1))) # (bs * num_sent, len)
-    attention_mask = attention_mask.view((-1, attention_mask.size(-1))) # (bs * num_sent len)
+    # input_ids = input_ids.view((-1, input_ids.size(-1)))  # (bs * num_sent, len)
+    # attention_mask = attention_mask.view((-1, attention_mask.size(-1))) # (bs * num_sent len)
+    # if token_type_ids is not None:
+    #     token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1))) # (bs * num_sent, len)
+
+
+    input_ids = torch.stack([input_ids0 for _ in range(num_sent)], dim=1).view((-1, input_ids.size(-1))) # (bs * num_sent, len)
+    attention_mask = torch.stack([attention_mask0 for _ in range(num_sent)],dim=1).view((-1, attention_mask.size(-1))) # (bs * num_sent len)
     if token_type_ids is not None:
-        token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1))) # (bs * num_sent, len)
+        token_type_ids = torch.stack([token_type_ids0 for _ in range(num_sent)], dim=1).view((-1, token_type_ids.size(-1))) # (bs * num_sent, len)
 
     # Get raw embeddings
     outputs = encoder(
@@ -163,13 +177,41 @@ def cl_forward(cls,
         return_dict=True,
     )
 
-    # MLM auxiliary objective
-    if mlm_input_ids is not None:
-        mlm_input_ids = mlm_input_ids.view((-1, mlm_input_ids.size(-1)))
-        mlm_outputs = encoder(
-            mlm_input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
+    ori_pooler_output = cls.pooler(attention_mask, outputs)
+    cls.ori_pooler_output = ori_pooler_output.view((batch_size, num_sent, ori_pooler_output.size(-1)))
+
+    # If using "cls", we add an extra MLP layer
+    # (same as BERT's original implementation) over the representation.
+    if cls.pooler_type == "cls":
+        pooler_output = cls.mlp(cls.ori_pooler_output)
+
+    # Separate representation
+    z1 = pooler_output[:,0]
+    pos_ratio = cls.model_args.pos_ratio
+    sampling_strategy = cls.model_args.sampling_strategy
+    SMALL_NUM = np.log(1e-45)
+    neg_mask = torch.eye(z1.size(0), device=z1.device)*SMALL_NUM
+
+    # sampling z2
+    if sampling_strategy=="mean":
+        z2 = pooler_output[:,1]
+
+    elif sampling_strategy=="farest":
+        z = pooler_output.mean(dim=1)  # (bs, d)
+        distance = (pooler_output[:, 1:] - z.unsqueeze(1)).pow(2).sum(dim=-1).sqrt()  # (bs, n_samples)
+        index = distance.argmax(dim=-1)  # bs
+        z2 = torch.stack([pooler_output[:, 1:][i, id] for i, id in enumerate(index)], dim=0)
+
+    elif sampling_strategy=="off_dropout":
+        z2 = pooler_output[:,1]
+        for name, layer in encoder.named_modules():
+            if isinstance(layer, nn.Dropout):
+                layer.eval()
+
+        outputs0 = encoder(
+            input_ids0,
+            attention_mask=attention_mask0,
+            token_type_ids=token_type_ids0,
             position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
@@ -178,96 +220,166 @@ def cl_forward(cls,
             return_dict=True,
         )
 
-    # Pooling
-    pooler_output = cls.pooler(attention_mask, outputs)
-    pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
+        z0 = cls.pooler(attention_mask0, outputs0)
+        if cls.pooler_type == "cls":
+            z0 = cls.mlp(z0)
+    elif sampling_strategy=="None":
+        z2 = pooler_output[:,1]
+    else:
+        raise NotImplementedError
 
-    # If using "cls", we add an extra MLP layer
-    # (same as BERT's original implementation) over the representation.
-    if cls.pooler_type == "cls":
-        pooler_output = cls.mlp(pooler_output)
-
-    # Separate representation
-    z1, z2 = pooler_output[:,0], pooler_output[:,1]
-
-    # Hard negative
-    if num_sent == 3:
-        z3 = pooler_output[:, 2]
-
-    # Gather all embeddings if using distributed training
-    if dist.is_initialized() and cls.training:
-        # Gather hard negative
-        if num_sent >= 3:
-            z3_list = [torch.zeros_like(z3) for _ in range(dist.get_world_size())]
-            dist.all_gather(tensor_list=z3_list, tensor=z3.contiguous())
-            z3_list[dist.get_rank()] = z3
-            z3 = torch.cat(z3_list, 0)
-
-        # Dummy vectors for allgather
-        z1_list = [torch.zeros_like(z1) for _ in range(dist.get_world_size())]
-        z2_list = [torch.zeros_like(z2) for _ in range(dist.get_world_size())]
-        # Allgather
-        dist.all_gather(tensor_list=z1_list, tensor=z1.contiguous())
-        dist.all_gather(tensor_list=z2_list, tensor=z2.contiguous())
-
-        # Since allgather results do not have gradients, we replace the
-        # current process's corresponding embeddings with original tensors
-        z1_list[dist.get_rank()] = z1
-        z2_list[dist.get_rank()] = z2
-        # Get full batch embeddings: (bs x N, hidden)
-        z1 = torch.cat(z1_list, 0)
-        z2 = torch.cat(z2_list, 0)
-
+    # CL learning
     loss = 0
     cos_sim = 0
+    if not cls.model_args.sw_only:
+        if sampling_strategy=="mean":
+            z = (z1 + z2) / 2
+            cos_sim = cls.sim(z.unsqueeze(0), z.unsqueeze(1))
+            pos_sim = cls.sim(z1, z2)
+            pos_loss = -pos_sim
+            neg_loss = torch.logsumexp(torch.cat([cos_sim + neg_mask, pos_sim.unsqueeze(-1)], dim=-1), dim=-1)
+        elif sampling_strategy=="farest":
+            # ## offdropout for neg
+            # for name, layer in encoder.named_modules():
+            #     if isinstance(layer, nn.Dropout):
+            #         layer.eval()
+            #
+            # outputs0 = encoder(
+            #     input_ids0,
+            #     attention_mask=attention_mask0,
+            #     token_type_ids=token_type_ids0,
+            #     position_ids=position_ids,
+            #     head_mask=head_mask,
+            #     inputs_embeds=inputs_embeds,
+            #     output_attentions=output_attentions,
+            #     output_hidden_states=True if cls.model_args.pooler_type in ['avg_top2', 'avg_first_last'] else False,
+            #     return_dict=True,
+            # )
+            # z0 = cls.pooler(attention_mask0, outputs0)
+            # if cls.pooler_type == "cls":
+            #     z0 = cls.mlp(z0)
+            # pos_sim = pos_ratio * cls.sim(z1, z2)
+            # pos_loss = -pos_sim
+            # cos_sim = cls.sim(z0.unsqueeze(0), z0.unsqueeze(1))
+            # neg_sim = torch.cat([cos_sim + neg_mask, pos_sim.unsqueeze(-1)], dim=-1)
+            # neg_loss = torch.logsumexp(neg_sim, dim=-1, keepdim=False)
+            #
+            # # ## 10 farest for pos, mean for neg
+            # # z = (z1 + z2) / 2
+            # # cos_sim = cls.sim(z.unsqueeze(0), z.unsqueeze(1))
+            # # pos_sim = cls.sim(z1, z2)
+            # # pos_loss = -pos_sim
+            # # neg_loss = torch.logsumexp(torch.cat([cos_sim + neg_mask, pos_sim.unsqueeze(-1)], dim=-1), dim=-1)
 
-    pos_ratio = cls.model_args.pos_ratio
-    pos_norm = cls.sim(z1, z2)
-    for name, layer in encoder.named_modules():
-        if isinstance(layer, nn.Dropout):
-            layer.eval()
+            cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+            pos_norm = torch.diag(cos_sim)
+            pos_loss = -pos_norm
+            neg_loss = torch.logsumexp(torch.cat([cos_sim + neg_mask], dim=-1), dim=-1)
+        elif sampling_strategy=="off_dropout":
+            pos_sim = pos_ratio * cls.sim(z1, z2)
+            pos_loss = -pos_sim
+            cos_sim = cls.sim(z0.unsqueeze(0), z0.unsqueeze(1))
+            neg_sim = torch.cat([cos_sim + neg_mask, pos_sim.unsqueeze(-1)], dim=-1)
+            neg_loss = torch.logsumexp(neg_sim, dim=-1, keepdim=False)
+        elif sampling_strategy=="None":
+            cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+            pos_sim = torch.diag(cos_sim)
+            pos_loss = -pos_sim
+            neg_loss = torch.logsumexp(cos_sim, dim=-1)
+        else:
+            raise NotImplementedError
 
-    outputs0 = encoder(
-        input_ids0,
-        attention_mask=attention_mask0,
-        token_type_ids=token_type_ids0,
-        position_ids=position_ids,
-        head_mask=head_mask,
-        inputs_embeds=inputs_embeds,
-        output_attentions=output_attentions,
-        output_hidden_states=True if cls.model_args.pooler_type in ['avg_top2', 'avg_first_last'] else False,
-        return_dict=True,
-    )
+        loss = (pos_loss + neg_loss).mean()
 
-    z0 = cls.pooler(attention_mask0, outputs0)
-    if cls.pooler_type == "cls":
-        z0 = cls.mlp(z0)
-    z0 = gather_from_dist(z0)
-    SMALL_NUM = np.log(1e-45)
-    pos_norm = pos_ratio * pos_norm
-    pos_loss = -pos_norm
-
-    cos_sim = cls.sim(z0.unsqueeze(0), z0.unsqueeze(1))
-    neg_mask = torch.eye(z1.size(0), device=z1.device)
-    neg_sim = cos_sim + neg_mask * SMALL_NUM
-    neg_sim = torch.cat([neg_sim, pos_norm.unsqueeze(-1)], dim=-1)
-    neg_loss = torch.logsumexp(neg_sim, dim=-1, keepdim=False)
-    loss = (pos_loss + neg_loss).mean()
+        cls.pos_sim_var = (-pos_loss).detach().var().cpu().numpy()
+        cls.neg_sim_var = cos_sim.detach().flatten()[:-1].reshape(batch_size-1, batch_size+1)[:,1:].reshape(batch_size, batch_size-1).var().cpu().numpy()
 
     # covariance
-    temp = cls.model_args.sw_temp
-    weight = cls.model_args.sw_weight
-    z1_normd, z2_normd = cls.bn(z1), cls.bn(z2)
-    cov = (z1_normd.T @ z2_normd)/batch_size/temp
-    cov_loss = (-torch.diagonal(cov)+torch.logsumexp(cov, dim=-1)).mean()
-    loss += weight * cov_loss
+    cov_mask = SMALL_NUM*torch.eye(z1.size(-1), device=z1.device)
+    sw_pos_ratio = cls.model_args.sw_pos_ratio
+    sw_sampling_strategy = cls.model_args.sw_sampling_strategy
+    if cls.model_args.sw_weight>0:
+        temp = cls.model_args.sw_temp
+        weight = cls.model_args.sw_weight
 
-    # Calculate loss for MLM
-    if mlm_outputs is not None and mlm_labels is not None:
-        mlm_labels = mlm_labels.view(-1, mlm_labels.size(-1))
-        prediction_scores = cls.lm_head(mlm_outputs.last_hidden_state)
-        masked_lm_loss = loss_fct(prediction_scores.view(-1, cls.config.vocab_size), mlm_labels.view(-1))
-        loss = loss + cls.model_args.mlm_weight * masked_lm_loss
+        if sw_sampling_strategy=="mean":
+            z = cls.bn((z1+z2)/2)
+            z1, z2 = cls.bn(z1), cls.bn(z2)
+            cov = (z.T @ z) /batch_size/temp
+            nu = (z1.T.unsqueeze(1) @ z2.T.unsqueeze(-1)) / batch_size /temp
+            de = torch.cat([ cov + cov_mask, nu.squeeze(-1)], dim=-1)
+        elif sw_sampling_strategy=="off_dropout":
+            z1, z2 = cls.bn(z1), cls.bn(z2)
+            nu = (z1.T.unsqueeze(1) @ z2.T.unsqueeze(-1)) / batch_size / temp
+            nu = nu*sw_pos_ratio
+            cov = (z0.T @ z0) / batch_size / temp
+            de = torch.cat([cov+cov_mask, nu.squeeze(-1)], dim=-1)
+        elif sw_sampling_strategy=="None":
+            z1, z2 = cls.bn(z1), cls.bn(z2)
+            cov = z1.T @ z2 / batch_size /temp
+            # cov = F.cosine_similarity(z1.T.unsqueeze(0), z2.T.unsqueeze(1), dim=-1) / temp
+            nu = torch.diag(cov)
+            de = cov
+        else:
+            raise NotImplementedError
+        cov_loss = (-nu+torch.logsumexp(de, dim=-1)).mean()
+        loss += weight * cov_loss
+        cls.c_pos_sim_var = nu.detach().var().cpu().numpy()
+        d = de.size(-1)
+        cls.c_neg_sim_var = de.detach().flatten()[:-1].reshape(d-1, d+1)[:,1:].reshape(d, d-1).var().cpu().numpy()
+
+    # for obs
+    cls.ori_pooler_output.retain_grad()  # (bs, num_sent, hidden)
+    with torch.no_grad():
+        d = {}
+        for name, layer in encoder.named_modules():
+            if isinstance(layer, nn.Dropout):
+                layer.train()
+                d[name]=layer.p
+                layer.p=0.1
+        eval_output = encoder(
+            torch.stack([input_ids0, input_ids0], dim=1).view(-1, input_ids.size(-1)),
+            attention_mask=torch.stack([attention_mask0, attention_mask0], dim=1).view(-1, input_ids.size(-1)),
+            token_type_ids=torch.stack([token_type_ids0, token_type_ids0], dim=1).view(-1, input_ids.size(-1)) if token_type_ids is not None else None,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=True if cls.model_args.pooler_type in ['avg_top2', 'avg_first_last'] else False,
+            return_dict=True,
+        )
+        r = cls.pooler(torch.stack([attention_mask0, attention_mask0], dim=1).view(-1, input_ids.size(-1))
+                       , eval_output).view(batch_size, 2, -1)
+
+        cls.align = align_loss(F.normalize(r[:, 0], dim=-1), F.normalize(r[:, 1], dim=-1)).detach().cpu().numpy()
+
+        if cls.model_args.sw_weight > 0:
+            cls.c_align = align_loss(r[:, 0].T, r[:, 1].T).detach().cpu().numpy()
+        for name, layer in encoder.named_modules():
+            if isinstance(layer, nn.Dropout):
+                layer.eval()
+        eval_output0 = encoder(
+            input_ids0,
+            attention_mask=attention_mask0,
+            token_type_ids=token_type_ids0,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=True if cls.model_args.pooler_type in ['avg_top2', 'avg_first_last'] else False,
+            return_dict=True,
+        )
+        r0 = cls.pooler(attention_mask0, eval_output0)
+
+        cls.uni = uniform_loss(F.normalize(r0, dim=-1)).detach().cpu().numpy()
+        if cls.model_args.sw_weight > 0:
+            cls.c_uni = uniform_loss(r0.T).detach().cpu().numpy()
+        for name, layer in encoder.named_modules():
+            if isinstance(layer, nn.Dropout):
+                layer.train()
+                layer.p=d[name]
+
+
 
     if not return_dict:
         output = (cos_sim,) + outputs[2:]

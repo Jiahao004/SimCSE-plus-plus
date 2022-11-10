@@ -62,8 +62,8 @@ if is_torch_tpu_available():
     import torch_xla.debug.metrics as met
     import torch_xla.distributed.parallel_loader as pl
 
-if is_apex_available():
-    from apex import amp
+# if is_apex_available():
+#     from apex import amp
 
 if version.parse(torch.__version__) >= version.parse("1.6"):
     _is_native_amp_available = True
@@ -447,6 +447,17 @@ class CLTrainer(Trainer):
 
             inputs = None
             last_inputs = None
+            self.obs={
+                "grad_diff":[],
+                "align":[],
+                "uni":[],
+                "pos_sim_var":[],
+                "neg_sim_var":[],
+                "c_align": [],
+                "c_uni": [],
+                "c_pos_sim_var": [],
+                "c_neg_sim_var": [],
+            }
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
@@ -463,6 +474,29 @@ class CLTrainer(Trainer):
                 else:
                     tr_loss += self.training_step(model, inputs)
                 self._total_flos += self.floating_point_ops(inputs)
+
+                #TODO: save observations
+                #(model.ori_pooler_output.grad[:,0].unsqueeze(1)-model.ori_pooler_output.grad[:,1].unsqueeze(1)).max(dim=-1).values
+
+                if hasattr(model, "align"):
+                    grad_diff = torch.cdist(model.ori_pooler_output.grad[:, 0].unsqueeze(1),
+                                            model.ori_pooler_output.grad[:, 1].unsqueeze(1),
+                                            p=2).mean().detach().cpu().numpy()
+                    self.obs["grad_diff"].append(grad_diff)
+                    self.obs["align"].append(model.align)
+                    self.obs["uni"].append(model.uni)
+                if hasattr(model, "pos_sim_var"):
+                    self.obs["pos_sim_var"].append(model.pos_sim_var)
+                    self.obs["neg_sim_var"].append(model.neg_sim_var)
+
+                if hasattr(model, "c_align"):
+                    self.obs["c_align"].append(model.c_align)
+                    self.obs["c_uni"].append(model.c_uni)
+
+                if hasattr(model, "c_pos_sim_var"):
+                    self.obs["c_pos_sim_var"].append(model.c_pos_sim_var)
+                    self.obs["c_neg_sim_var"].append(model.c_neg_sim_var)
+
 
                 if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
                     # last step in epoch but step is always smaller than gradient_accumulation_steps
@@ -555,5 +589,6 @@ class CLTrainer(Trainer):
         self.control = self.callback_handler.on_train_end(self.args, self.state, self.control)
         # add remaining tr_loss
         self._total_loss_scalar += tr_loss.item()
+
 
         return TrainOutput(self.state.global_step, self._total_loss_scalar / self.state.global_step, metrics)
