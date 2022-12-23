@@ -457,6 +457,8 @@ class CLTrainer(Trainer):
                 "c_uni": [],
                 "c_pos_sim_var": [],
                 "c_neg_sim_var": [],
+                "t_loss":[],
+                "d_loss": [],
             }
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
@@ -496,6 +498,11 @@ class CLTrainer(Trainer):
                 if hasattr(model, "c_pos_sim_var"):
                     self.obs["c_pos_sim_var"].append(model.c_pos_sim_var)
                     self.obs["c_neg_sim_var"].append(model.c_neg_sim_var)
+
+                if hasattr(model, "t_loss"):
+                    self.obs["t_loss"].append(model.t_loss)
+                    self.obs["d_loss"].append(model.d_loss)
+
 
 
                 if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
@@ -592,3 +599,31 @@ class CLTrainer(Trainer):
 
 
         return TrainOutput(self.state.global_step, self._total_loss_scalar / self.state.global_step, metrics)
+
+    def _maybe_log_save_evaluate(self, tr_loss, model, trial, epoch):
+        if self.control.should_log:
+            logs: Dict[str, float] = {}
+            tr_loss_scalar = tr_loss.item()
+            # reset tr_loss to zero
+            tr_loss -= tr_loss
+
+            logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
+            # backward compatibility for pytorch schedulers
+            logs["learning_rate"] = (
+                self.lr_scheduler.get_last_lr()[0]
+                if version.parse(torch.__version__) >= version.parse("1.4")
+                else self.lr_scheduler.get_lr()[0]
+            )
+            self._total_loss_scalar += tr_loss_scalar
+            self._globalstep_last_logged = self.state.global_step
+
+            self.log(logs)
+
+        metrics = None
+        if self.control.should_evaluate:
+            metrics = self.evaluate()
+            self._report_to_hp_search(trial, epoch, metrics)
+
+        if self.control.should_save:
+            self._save_checkpoint(model, trial, metrics=metrics)
+            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
