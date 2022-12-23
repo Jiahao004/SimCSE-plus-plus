@@ -154,7 +154,7 @@ class ModelArguments:
         }
     )
     sw_weight:float=field(
-        default=-1,
+        default=0.1,
         metadata={
             "help":"soft whitening objective weight, 0.1 by default"
         }
@@ -173,6 +173,21 @@ class ModelArguments:
     )
     sw_only: bool = field(
         default=False, metadata={"help":"if only use orthogonal learning without data instance wise CL"}
+    )
+    sw_obj:str=field(
+        default="softmax",metadata={"help":"if use cosine distance to measure"}
+    )
+    sw_diag_tgt: float=field(
+        default=1, metadata={"help":"the diag element of correlation matrix"}
+    )
+    sw_offdiag_tgt:float=field(
+        default=0, metadata={"help":"the offdiag element of correlation matrix"}
+    )
+    scd_group_id:int=field(
+        default=0, metadata={"help":"the decorrelation group id for correlation topk matrix"}
+    )
+    dim_scd:int=field(
+        default=0, metadata={"help":"the dimension of SCD embedding layer"}
     )
 
 
