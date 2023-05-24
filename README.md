@@ -1,11 +1,10 @@
-# decoupled_simcse
+# ImSimCSE
 ![Fig1. Decoupled simcse balance the loss for both subnetworks during contrastive learning](https://github.com/Jiahao004/decoupled_simcse/blob/main/1.png)
 
-decoupled_simcse
+ImSimCSE
 ## environment
 cuda10.2
 datasets==1.18.3
-
 
 bert-base-uncased: torch==1.10.2; bert-large-uncased: torch==1.12.1
 
