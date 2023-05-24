@@ -14,11 +14,11 @@ two scripts
 
 original simcse: run_unsup_examples.sh
 
-decoupled simcse (non-dropout version): run_re.sh
+off-dropout SimCSE: run_re.sh
 
-soft whitening simcse: run_vicreg.sh
+DCL SimCSE: run_vicreg.sh
 
-SwDeCSE: run_re_vicreg.sh
+ImSimCSE: run_re_vicreg.sh
 
 ### non-dropout version
 sample one more representation without dropout (full PLM network) for negative contrasting, while using the dropout positives for regulization only
