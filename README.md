@@ -1,7 +1,7 @@
-# ImSimCSE
-![Fig1. Decoupled simcse balance the loss for both subnetworks during contrastive learning](https://github.com/Jiahao004/decoupled_simcse/blob/main/1.png)
+# SimCSE++
+This is the official source code of SimCSE++
 
-ImSimCSE
+SimCSE++
 ## environment
 cuda10.2
 datasets==1.18.3
