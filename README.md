@@ -19,5 +19,3 @@ DCL SimCSE: run_vicreg.sh
 
 SimCSE++: run_re_vicreg.sh
 
-### non-dropout version
-sample one more representation without dropout (full PLM network) for negative contrasting, while using the dropout positives for regulization only
